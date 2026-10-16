@@ -82,6 +82,32 @@ export interface JammerStatus {
   target_track_id: string | null;
 }
 
+export interface SensorTelemetryStats {
+  radar_stats?: {
+    fc_ghz: number;
+    pt_w: number;
+    cpi_pulses: number;
+    pfa: number;
+    detection_count: number;
+  };
+  rf_stats?: {
+    array_elements: number;
+    algorithm: string;
+    detection_count: number;
+    active_protocols: string[];
+  };
+  gnss_stats?: {
+    nominal_cn0: number;
+    gate_chi2: number;
+    spoofed_count: number;
+  };
+  micro_doppler_stats?: {
+    uav_min_flash_hz: number;
+    avian_max_flash_hz: number;
+    mean_rpm: number;
+  };
+}
+
 export interface TelemetryPayload {
   timestamp: number;
   frame: number;
@@ -90,6 +116,7 @@ export interface TelemetryPayload {
   radar_detections: RadarDetection[];
   rf_bearings: RFBearing[];
   jammer_status: JammerStatus;
+  sensors?: SensorTelemetryStats;
 }
 
 // Retain legacy radio interceptor types for compatibility

@@ -69,6 +69,7 @@ async def simulation_tick_loop():
     global frame_counter
     logger.info("Initializing Garuda-Aegis 20Hz Simulation Event Loop...")
     swarm_sim.initialize_default_scenario()
+    rf_jammer.deactivate_jammer()
 
     while simulation_running:
         start_time = time.perf_counter()
@@ -106,11 +107,12 @@ async def simulation_tick_loop():
                     rf_jammer.aim_az_rad = float(np.arctan2(p[1], p[0]))
                     rf_jammer.aim_el_rad = float(np.arcsin(np.clip(p[2] / r, -1.0, 1.0)))
 
-            # Evaluate jamming impact against all swarm drones
+            # Evaluate jamming impact against all swarm drones with progressive DT exposure
             for drone in swarm_sim.drones.values():
                 res = rf_jammer.evaluate_jamming_on_drone(
                     drone_id=drone.drone_id,
                     drone_pos=drone.position,
+                    dt=DT_TICK,
                 )
                 swarm_sim.update_drone_link_state(drone.drone_id, res.link_state)
 
@@ -152,6 +154,31 @@ async def simulation_tick_loop():
                     "ground_truth_drones": drones_ground_truth,
                     "radar_detections": radar_dicts,
                     "rf_bearings": rf_dicts,
+                    "sensors": {
+                        "radar_stats": {
+                            "fc_ghz": 10.0,
+                            "pt_w": 150.0,
+                            "cpi_pulses": 64,
+                            "pfa": 1e-6,
+                            "detection_count": len(radar_dicts),
+                        },
+                        "rf_stats": {
+                            "array_elements": 8,
+                            "algorithm": "ROOT_MUSIC_360",
+                            "detection_count": len(rf_dicts),
+                            "active_protocols": list({b["protocol"] for b in rf_dicts}),
+                        },
+                        "gnss_stats": {
+                            "nominal_cn0": 43.0,
+                            "gate_chi2": 16.266,
+                            "spoofed_count": sum(1 for b in rf_dicts if b.get("gnss_spoof_flag")),
+                        },
+                        "micro_doppler_stats": {
+                            "uav_min_flash_hz": 600.0,
+                            "avian_max_flash_hz": 60.0,
+                            "mean_rpm": 5600.0,
+                        },
+                    },
                     "jammer_status": {
                         "is_active": rf_jammer.is_active,
                         "aim_az_deg": float(np.rad2deg(rf_jammer.aim_az_rad)),
@@ -266,6 +293,22 @@ async def reset_simulation():
     swarm_sim.initialize_default_scenario()
     logger.info("Simulation scenario and tracks reset to default state.")
     return {"status": "RESET_SUCCESSFUL"}
+
+
+@app.post("/api/v1/simulation/spawn-swarm")
+async def spawn_swarm_raid():
+    """Dynamically spawns a coordinated 6-drone multi-sector attack raid."""
+    new_ids = swarm_sim.spawn_multi_sector_swarm(count=6)
+    logger.warning(f"Spawned 6-Drone Multi-Sector Swarm Raid: {new_ids}")
+    return {"status": "SWARM_SPAWNED", "drone_ids": new_ids}
+
+
+@app.post("/api/v1/defense/spoof-redirect")
+async def redirect_spoofed_attackers():
+    """Transmits deceptive ephemeris to deflect GNSS spoofed drones away from the protected zone."""
+    count = swarm_sim.redirect_spoofed_drones()
+    logger.warning(f"GNSS Spoofing Countermeasure: Redirected {count} drones away from base.")
+    return {"status": "SPOOF_REDIRECT_ACTIVE", "redirected_count": count}
 
 
 @app.get("/api/v1/forensics/dossier/{target_id}")

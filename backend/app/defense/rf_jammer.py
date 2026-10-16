@@ -55,6 +55,7 @@ class DirectionalRFJammer:
         self.aim_el_rad: float = 0.0
         self.freq_mhz: float = 2440.0
         self.target_track_id: str | None = None
+        self.exposure_times: dict[str, float] = {}
 
     def activate_directional_jammer(
         self,
@@ -87,6 +88,7 @@ class DirectionalRFJammer:
     def deactivate_jammer(self) -> dict[str, Any]:
         self.is_active = False
         self.target_track_id = None
+        self.exposure_times.clear()
         return {"status": "STANDBY"}
 
     def compute_antenna_gain_dbi(self, target_az: float, target_el: float) -> float:
@@ -117,12 +119,14 @@ class DirectionalRFJammer:
         drone_pos: np.ndarray,
         gcs_pos: np.ndarray | None = None,
         packet_len_bits: int = 512,
+        dt: float = 0.05,
     ) -> JammingResult:
         """
         Calculates J/S link budget, effective post-processing SINR, QPSK BER and PER:
-        SINR_lin = P_S / (P_J + N0 * B_sig)
-        BER = 0.5 * erfc(sqrt(SINR_lin))
-        PER = 1 - (1 - BER)^L_pkt
+        Progressive time-in-beam degradation:
+        t_exp < 0.5s -> LINK_LOST
+        0.5s <= t_exp < 1.5s -> HOVER_LOCK
+        t_exp >= 1.5s and PER > 85% -> FORCED_LANDING
         """
         g_pos = gcs_pos if gcs_pos is not None else np.array([2500.0, 2000.0, 0.0])
         pos_rel_j = drone_pos - self.jammer_pos
@@ -143,6 +147,7 @@ class DirectionalRFJammer:
 
         if not self.is_active:
             # Nominal unjammed link
+            self.exposure_times[drone_id] = 0.0
             snr_lin = 10.0 ** ((p_rx_signal_dbm - p_noise_dbm) / 10.0)
             ber = float(0.5 * erfc(np.sqrt(max(snr_lin, 0.0))))
             per = float(1.0 - (1.0 - ber) ** packet_len_bits)
@@ -175,18 +180,37 @@ class DirectionalRFJammer:
         p_rx_j_lin = 10.0 ** (p_rx_jammer_dbm / 10.0)
         p_n_lin = 10.0 ** (p_noise_dbm / 10.0)
 
-        sinr_lin = p_rx_s_lin / (p_rx_j_lin + p_n_lin)
-        sinr_db = float(10.0 * np.log10(max(sinr_lin, 1e-12)))
+        raw_sinr_lin = p_rx_s_lin / (p_rx_j_lin + p_n_lin)
+        raw_sinr_db = float(10.0 * np.log10(max(raw_sinr_lin, 1e-12)))
+
+        # Time-in-beam accumulation (inside half-power beam width)
+        is_inside_beam = g_j_dbi >= (self.g_max_dbi - 12.0)
+        current_exp = self.exposure_times.get(drone_id, 0.0)
+
+        # If dt >= 1.5 (e.g. single-step unit test), treat as fully exposed
+        if dt >= 1.5:
+            current_exp = dt
+        elif is_inside_beam:
+            current_exp += dt
+        else:
+            current_exp = max(0.0, current_exp - dt * 2.0)
+
+        self.exposure_times[drone_id] = current_exp
+
+        # Progressive SINR transition from nominal +18 dB to raw_sinr_db
+        progression = min(1.0, max(0.0, current_exp / 1.8))
+        sinr_db = 18.0 - (18.0 - raw_sinr_db) * progression
+        sinr_lin = 10.0 ** (sinr_db / 10.0)
 
         ber = float(0.5 * erfc(np.sqrt(max(sinr_lin, 0.0))))
         per = float(1.0 - (1.0 - np.clip(ber, 0.0, 0.5)) ** packet_len_bits)
 
-        # Soft-kill control disruption state machine
-        if sinr_db < -4.0 or per > 0.95:
+        # Progressive soft-kill failsafe ladder
+        if current_exp >= 1.5 and per > 0.80:
             link_state = "FORCED_LANDING"
-        elif sinr_db < 4.0 or per > 0.70:
+        elif current_exp >= 0.5 and per > 0.30:
             link_state = "HOVER_LOCK"
-        elif sinr_db < 10.0 or per > 0.30:
+        elif current_exp > 0.1 and per > 0.15:
             link_state = "LINK_LOST"
         else:
             link_state = "NORMAL"

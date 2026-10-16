@@ -109,6 +109,22 @@ class TelemetryService {
     return res.json();
   }
 
+  public async spawnSwarm(count: number = 6): Promise<any> {
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/simulation/spawn-swarm?count=${count}`, {
+      method: 'POST',
+    });
+    if (!res.ok) throw new Error('Spawn swarm raid request failed.');
+    return res.json();
+  }
+
+  public async redirectSpoofed(headingOffsetDeg: number = 45.0): Promise<any> {
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/defense/spoof-redirect?heading_offset_deg=${headingOffsetDeg}`, {
+      method: 'POST',
+    });
+    if (!res.ok) throw new Error('GNSS spoof redirect request failed.');
+    return res.json();
+  }
+
   public async getDossier(targetId: string): Promise<any> {
     const res = await fetch(`${this.apiBaseUrl}/api/v1/forensics/dossier/${targetId}`);
     if (!res.ok) throw new Error(`Failed to retrieve forensic dossier for ${targetId}`);

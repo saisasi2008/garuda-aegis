@@ -529,4 +529,142 @@ In `backend/app/main.py`, run a **20 Hz (`dt = 0.05s`) asynchronous background t
 3. **Multi-Sensor Data Fusion Step (`track_manager.py`):**
    Predict all 9-state UKF tracks forward by $\Delta t = 0.05\text{ s}$, gate incoming 3D Radar detections and 2D RF bearings via Mahalanobis distance ($\chi^2$), associate via Hungarian GNN, and update the posterior state vector $\hat{\mathbf{x}}_{k|k}$ and covariance $\mathbf{P}_{k|k}$.
 4. **Electronic Warfare Soft-Kill Step (`rf_jammer.py`):**
-   When an operator activates the jammer on a confirmed hostile track, calculate the Jamming-to-
+   When an operator activates the jammer on a confirmed hostile track, calculate the Jamming-to-Signal ratio at the target UAV receiver at distance $d_J$ from the jammer and $d_{\text{GCS}}$ from its controller:
+   $$\left(\frac{J}{S}\right)_{\text{dB}} = \left(\text{EIRP}_J(\Delta\psi) - \text{EIRP}_{\text{GCS}}\right) + 20\log_{10}\left(\frac{d_{\text{GCS}}}{d_J}\right) + G_{\text{rx},J} - 10\log_{10}\left(\frac{B_J}{B_{\text{sig}}}\right) - L_{\text{pol}}$$
+   Feed $\text{SINR} = -(J/S)$ into `UavNetSim-v1`'s packet loss curve $\text{PER} = 1 - (1 - \text{BER})^{L_{\text{pkt}}}$. Once $\text{PER} > 0.85$ for $1.5\text{ seconds}$, override the target UAV's mobility mode to `JAMMED_HOVER` or `FORCED_DESCENT`.
+
+#### 4.1 Production Implementation: `backend/app/sensors/radar_3d.py` & `backend/app/defense/rf_jammer.py`
+
+```python
+import numpy as np
+from scipy.special import erfc
+
+
+def simulate_swerling1_radar_scan(
+    drones: list[dict],
+    rcs_mean_sqm: float = 0.025,
+    fc_hz: float = 10.0e9,
+    blade_length_m: float = 0.12,
+    num_blades: int = 2,
+) -> list[dict]:
+    """Simulates 3D Pulse-Doppler Radar with Swerling Case 1 RCS, CFAR gating, and Micro-Doppler."""
+    c = 3.0e8
+    detections = []
+    for d in drones:
+        px, py, pz = d["pos"]
+        vx, vy, vz = d["vel"]
+        r = max(np.sqrt(px**2 + py**2 + pz**2), 1.0)
+        az = np.arctan2(py, px)
+        el = np.arcsin(np.clip(pz / r, -1.0, 1.0))
+        r_dot = (px * vx + py * vy + pz * vz) / r
+
+        # Swerling Case 1 exponential RCS fluctuation
+        inst_rcs = np.random.exponential(scale=rcs_mean_sqm)
+        rcs_dbsm = 10.0 * np.log10(max(inst_rcs, 1e-6))
+
+        # Rotor Micro-Doppler sideband calculation: f_mD = (2 * fc / c) * L_b * Omega * cos(el)
+        rpm = d.get("rpm", 5500.0)
+        omega_rad_s = 2.0 * np.pi * (rpm / 60.0)
+        f_md_max = (2.0 * fc_hz / c) * blade_length_m * omega_rad_s * np.cos(el) if rpm > 0 else 35.0
+
+        # Add realistic thermal sensor noise
+        detections.append({
+            "range_m": float(r + np.random.normal(0.0, 1.5)),
+            "az_rad": float(az + np.random.normal(0.0, np.deg2rad(0.8))),
+            "el_rad": float(el + np.random.normal(0.0, np.deg2rad(1.0))),
+            "doppler_mps": float(r_dot + np.random.normal(0.0, 0.4)),
+            "rcs_dbsm": float(rcs_dbsm),
+            "micro_doppler_hz": float(f_md_max),
+            "blade_flash_hz": float((num_blades * omega_rad_s) / (2.0 * np.pi)),
+        })
+    return detections
+
+
+def compute_directional_jammer_effect(
+    uav_pos: np.ndarray,
+    gcs_pos: np.ndarray,
+    jammer_az_rad: float,
+    jammer_el_rad: float,
+    beamwidth_rad: float = np.deg2rad(30.0),
+    eirp_j_dbm: float = 62.0,
+    eirp_gcs_dbm: float = 26.0,
+    bw_ratio_db: float = 3.0,
+    pol_loss_db: float = 1.5,
+) -> tuple[float, float]:
+    """Computes post-jamming SINR (dB) and Packet Error Rate (PER %) using UavNetSim-v1 link budget."""
+    d_j = max(float(np.linalg.norm(uav_pos)), 1.0)
+    d_gcs = max(float(np.linalg.norm(uav_pos - gcs_pos)), 1.0)
+
+    target_az = np.arctan2(uav_pos[1], uav_pos[0])
+    target_el = np.arcsin(np.clip(uav_pos[2] / d_j, -1.0, 1.0))
+
+    delta_az = (target_az - jammer_az_rad + np.pi) % (2.0 * np.pi) - np.pi
+    delta_el = target_el - jammer_el_rad
+    delta_psi = np.sqrt(delta_az**2 + delta_el**2)
+
+    # Off-axis parabolic antenna gain roll-off: G_J(dPsi) = G_max - 12 * (dPsi / theta_3dB)^2
+    pattern_loss_db = 12.0 * ((delta_psi / beamwidth_rad) ** 2)
+    effective_eirp_j = max(eirp_j_dbm - pattern_loss_db, 0.0)
+
+    j_over_s_db = (
+        (effective_eirp_j - eirp_gcs_dbm)
+        + 20.0 * np.log10(d_gcs / d_j)
+        - bw_ratio_db
+        - pol_loss_db
+    )
+    sinr_db = -j_over_s_db
+    sinr_lin = 10.0 ** (sinr_db / 10.0)
+
+    # QPSK OFDM Bit Error Rate & 512-bit Packet Error Rate
+    ber = 0.5 * float(erfc(np.sqrt(max(sinr_lin, 1e-6))))
+    per = 1.0 - ((1.0 - ber) ** 512)
+    return float(sinr_db), float(np.clip(per * 100.0, 0.0, 100.0))
+```
+
+---
+
+### Step 5: Wire the WebSocket Telemetry Contract to the React WebGL UI (Hours 18–24)
+
+Connect your FastAPI backend (`ws://127.0.0.1:8000/ws/telemetry`) to `cuas-radio-interceptor`'s React WebGL frontend using this unified 20 Hz JSON telemetry schema:
+
+```json
+{
+  "timestamp": 1792155540.05,
+  "frame_id": 1420,
+  "sensors": {
+    "radar_detections": [
+      {
+        "range_m": 412.5,
+        "az_rad": 0.523,
+        "el_rad": 0.198,
+        "doppler_mps": -14.2,
+        "rcs_dbsm": -15.4,
+        "micro_doppler_hz": 1480.0
+      }
+    ],
+    "rf_lob_bearings": [
+      {
+        "az_rad": 0.528,
+        "el_rad": 0.201,
+        "protocol": "DJI_OcuSync_3",
+        "freq_mhz": 5785.0,
+        "gnss_spoof_flag": true
+      }
+    ]
+  },
+  "fused_tracks": [
+    {
+      "track_id": "TRK-004",
+      "status": "CONFIRMED",
+      "classification": "HOSTILE_QUADCOPTER",
+      "state_9d": [350.2, 202.4, 81.0, -12.1, -7.0, -1.2, 0.4, 0.1, 0.0],
+      "covariance_diag": [1.2, 1.2, 1.8, 0.4, 0.4, 0.5, 0.1, 0.1, 0.1],
+      "mahalanobis_nis": 3.84,
+      "threat_score": 0.94,
+      "ew_status": "JAMMING_ACTIVE",
+      "link_sinr_db": -11.4,
+      "packet_loss_pct": 96.2
+    }
+  ]
+}
+```

@@ -59,51 +59,99 @@ class SwarmSimulationManager:
         self.wind_velocity = np.array([1.5, 0.5, 0.0])  # Mild environmental crosswind
 
     def initialize_default_scenario(self) -> None:
-        """Initializes a tactical multi-drone swarm scenario attacking toward protected asset at origin."""
+        """Initializes a tactical multi-drone swarm scenario attacking toward protected asset from 4 distinct quadrants."""
         self.drones.clear()
 
-        # Drone 1: Fast lead scout, OcuSync 2.4 GHz
+        # Drone 1 (Sector Alpha ~35° North-East): Fast lead scout, OcuSync 2.4 GHz
         self.add_drone(
             drone_id="UAV-ALPHA-01",
-            initial_pos=np.array([1800.0, 1200.0, 140.0]),
-            initial_vel=np.array([-14.0, -9.0, 0.0]),
+            initial_pos=np.array([1720.0, 1204.0, 140.0]),
+            initial_vel=np.array([-11.5, -8.0, 0.0]),
             frequency_mhz=2437.0,
             rcs_mean=0.03,
             rotor_rpm=6200.0,
         )
 
-        # Drone 2: Tactical autonomous wingman, MAVLink 915 MHz with GNSS spoofing active
+        # Drone 2 (Sector Bravo ~125° North-West): Tactical autonomous wingman, MAVLink 915 MHz with active GNSS spoofing
         d2 = self.add_drone(
             drone_id="UAV-BRAVO-02",
-            initial_pos=np.array([2100.0, 950.0, 160.0]),
-            initial_vel=np.array([-13.0, -6.0, 0.0]),
+            initial_pos=np.array([-1319.0, 1884.0, 160.0]),
+            initial_vel=np.array([8.0, -11.5, 0.0]),
             frequency_mhz=915.0,
             rcs_mean=0.045,
             rotor_rpm=5400.0,
         )
-        # GNSS spoofing: fake position 400m away with anomalous C/N0 = 56 dB-Hz
-        d2.spoofed_gnss_position = np.array([2500.0, 1350.0, 300.0])
+        # GNSS spoofing: fake position 450m offset with anomalous C/N0 = 56.5 dB-Hz
+        d2.spoofed_gnss_position = np.array([-1319.0 + 350.0, 1884.0 + 300.0, 280.0])
         d2.carrier_to_noise_db_hz = 56.5
 
-        # Drone 3: High-speed FPV munition interceptor, ExpressLRS 868 MHz
+        # Drone 3 (Sector Charlie ~310° South-East): High-speed FPV munition interceptor, ExpressLRS 868 MHz
         self.add_drone(
             drone_id="UAV-CHARLIE-03",
-            initial_pos=np.array([1600.0, 1600.0, 90.0]),
-            initial_vel=np.array([-18.0, -16.0, 0.0]),
+            initial_pos=np.array([1253.0, -1494.0, 110.0]),
+            initial_vel=np.array([-10.0, 12.0, 0.0]),
             frequency_mhz=868.0,
             rcs_mean=0.015,
             rotor_rpm=7800.0,
         )
 
-        # Drone 4: Stacked follower flying directly under Drone 2 (tests downwash wake deficit)
+        # Drone 4 (Sector Delta ~220° South-West): Long-range loitering munition, LoRa 433 MHz
         self.add_drone(
             drone_id="UAV-DELTA-04",
-            initial_pos=np.array([2100.2, 950.1, 158.5]),  # 1.5m below Drone 2
-            initial_vel=np.array([-13.0, -6.0, 0.0]),
-            frequency_mhz=2462.0,
-            rcs_mean=0.03,
+            initial_pos=np.array([-1608.0, -1350.0, 130.0]),
+            initial_vel=np.array([10.5, 8.8, 0.0]),
+            frequency_mhz=433.0,
+            rcs_mean=0.035,
             rotor_rpm=5500.0,
         )
+
+    def spawn_multi_sector_swarm(self, count: int = 6) -> list[str]:
+        """Dynamically injects a coordinated multi-sector drone raid attacking from all bearings."""
+        azimuths_deg = [35.0, 90.0, 125.0, 180.0, 240.0, 310.0]
+        distances = [2100.0, 2000.0, 2300.0, 2150.0, 2250.0, 1950.0]
+        altitudes = [140.0, 120.0, 170.0, 150.0, 130.0, 110.0]
+        protocols = [2437.0, 5800.0, 915.0, 2462.0, 433.0, 868.0]
+        speeds = [12.0, 14.0, 11.0, 13.0, 10.0, 17.0]
+
+        created_ids = []
+        for i in range(min(count, len(azimuths_deg))):
+            az_rad = np.deg2rad(azimuths_deg[i])
+            r = distances[i]
+            z = altitudes[i]
+            px = r * np.cos(az_rad)
+            py = r * np.sin(az_rad)
+            speed = speeds[i]
+            vx = -speed * np.cos(az_rad)
+            vy = -speed * np.sin(az_rad)
+
+            d_id = f"UAV-RAID-{i+1:02d}"
+            d = self.add_drone(
+                drone_id=d_id,
+                initial_pos=np.array([px, py, z]),
+                initial_vel=np.array([vx, vy, 0.0]),
+                frequency_mhz=protocols[i],
+                rcs_mean=0.025 + i * 0.005,
+                rotor_rpm=5400.0 + i * 400.0,
+            )
+            if i == 2:  # Inject spoofing into raid drone 3
+                d.spoofed_gnss_position = np.array([px + 400.0, py + 300.0, z + 100.0])
+                d.carrier_to_noise_db_hz = 57.0
+            created_ids.append(d_id)
+        return created_ids
+
+    def redirect_spoofed_drones(self, heading_offset_rad: float = np.deg2rad(130.0)) -> int:
+        """Transmits deceptive ephemeris to deflect spoofed drones away from the protected zone."""
+        redirected_count = 0
+        for drone in self.drones.values():
+            if drone.spoofed_gnss_position is not None:
+                # Rotate velocity vector 130 degrees away from origin
+                cos_a, sin_a = np.cos(heading_offset_rad), np.sin(heading_offset_rad)
+                vx, vy = drone.velocity[0], drone.velocity[1]
+                drone.velocity[0] = vx * cos_a - vy * sin_a
+                drone.velocity[1] = vx * sin_a + vy * cos_a
+                drone.link_state = "LINK_LOST"  # Causes drone to drift away
+                redirected_count += 1
+        return redirected_count
 
     def add_drone(
         self,

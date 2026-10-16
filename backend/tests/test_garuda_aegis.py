@@ -196,7 +196,10 @@ def test_directional_rf_jammer_soft_kill():
     el = float(np.arcsin(100.0 / np.linalg.norm(drone_pos)))
     jammer.activate_directional_jammer(azimuth_rad=az, elevation_rad=el, power_w=100.0)
 
-    res_jammed = jammer.evaluate_jamming_on_drone("UAV-01", drone_pos)
+    # Sustained jamming over 2.0 seconds (40 frames at 20 Hz) to test progressive link degradation
+    for _ in range(40):
+        res_jammed = jammer.evaluate_jamming_on_drone("UAV-01", drone_pos, dt=0.05)
+
     assert res_jammed.j_to_s_db > 10.0
     assert res_jammed.sinr_db < 0.0
     assert res_jammed.per > 0.8

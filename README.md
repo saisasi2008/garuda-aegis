@@ -168,8 +168,6 @@ python -m ruff check app/ tests/
 # All checks passed! (0 errors, 0 warnings)
 ```
 
----
-
 ## 📡 REST API Reference
 
 | Method | Endpoint | Description |
@@ -178,9 +176,11 @@ python -m ruff check app/ tests/
 | `POST` | `/api/v1/defense/jam` | Directs and fires the high-power directional RF jammer |
 | `POST` | `/api/v1/defense/disarm` | Deactivates the RF countermeasure beam |
 | `GET` | `/api/v1/defense/status` | Returns jammer aim angles, power, and lock-on state |
+| `POST` | `/api/v1/defense/spoof-redirect` | Injects course diversion offset (+45°) on spoofed tracks |
+| `POST` | `/api/v1/simulation/spawn-swarm` | Spawns a coordinated 6-drone multi-sector attack raid |
 | `POST` | `/api/v1/simulation/reset` | Resets swarm positions, UKF tracks, and jammer state |
 | `GET` | `/api/v1/forensics/dossier/{id}` | Generates signed FAA Part 89/107 forensic dossier (SHA-256) |
-| `WS` | `/ws/telemetry` | 20 Hz WebSocket stream of tracks, radar blips, and LOBs |
+| `WS` | `/ws/telemetry` | 20 Hz WebSocket stream of tracks, radar blips, LOBs, and 4-sensor stats |
 
 ---
 

@@ -1,0 +1,20 @@
+FROM node:20-alpine AS build
+WORKDIR /app
+
+ARG VITE_API_BASE_URL=http://localhost:8000
+ARG VITE_WS_URL=ws://localhost:8000/ws/telemetry
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+ENV VITE_WS_URL=${VITE_WS_URL}
+
+COPY package.json package-lock.json* tsconfig.json vite.config.ts index.html ./
+COPY src ./src
+
+RUN npm install
+RUN npm run build
+
+FROM nginx:1.27-alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]
